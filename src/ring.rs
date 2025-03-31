@@ -1,173 +1,106 @@
-use std::marker::PhantomData;
 use ark_ec::{
-    AffineRepr, CurveConfig, CurveGroup,
-    short_weierstrass::{Affine, SWCurveConfig},
+    CurveConfig, CurveGroup, PrimeGroup, hashing::HashToCurve, short_weierstrass::SWCurveConfig,
     twisted_edwards::TECurveConfig,
 };
-use ark_ed25519::EdwardsConfig;
-use ark_ff::{BigInteger, BigInteger256, UniformRand};
-use ark_secp256k1::Config;
+use ark_ff::{BigInt, BigInteger, BigInteger256, FftField, UniformRand};
 use ark_std::rand;
+use std::ops::Mul;
+
+type CurvePoint<C> = <<C as CurveConfig>::ScalarField as Mul<BigInt<4>>>::Output;
 
 #[derive(PartialEq, Eq)]
-pub struct Ring<P, C>
+pub struct Ring<C>
 where
-    P: ark_ec::AffineRepr,
-    C: ark_ec::CurveConfig,
+    C: ark_ec::CurveConfig + HashToCurve<C> + CurveGroup,
+    <C as CurveConfig>::ScalarField: CurveGroup,
+    <C as CurveConfig>::ScalarField: Mul<BigInt<4>>,
+    <<C as CurveConfig>::ScalarField as Mul<BigInt<4>>>::Output: CurveGroup,
 {
-    keys: Vec<P>,
-    curve: PhantomData<C>,
+    keys: Vec<CurvePoint<C>>,
 }
 
-/// Ed25519 curve impl
-impl Ring<ark_ec::twisted_edwards::Affine<EdwardsConfig>, EdwardsConfig> {
-    pub fn new(
-        ring_size: usize,
-        private_key: BigInteger256,
-        index: usize,
-    ) -> Ring<ark_ec::twisted_edwards::Affine<EdwardsConfig>, EdwardsConfig> {
+impl<C> Ring<C>
+where
+    C: ark_ec::CurveConfig + HashToCurve<C> + CurveGroup,
+    <C as CurveConfig>::ScalarField: CurveGroup,
+    <C as CurveConfig>::ScalarField: Mul<BigInt<4>>,
+    <<C as CurveConfig>::ScalarField as Mul<BigInt<4>>>::Output: CurveGroup,
+{
+    pub fn new(ring_size: usize, private_key: BigInteger256, index: usize) -> Ring<C> {
         assert!(index < ring_size);
-        assert!(!private_key.is_zero());
-        let public_key = EdwardsConfig::GENERATOR.mul_bigint(private_key).into_affine();
-        let mut public_keys: Vec<ark_ec::twisted_edwards::Affine<EdwardsConfig>> = (0..ring_size)
+        assert!(!BigInteger::is_zero(&private_key));
+
+        let public_key: CurvePoint<C> =
+            <<C as CurveConfig>::ScalarField>::GENERATOR.mul(private_key);
+        let mut public_keys: Vec<CurvePoint<C>> = (0..ring_size)
             .into_iter()
             .map(|_| {
                 let mut rng = rand::thread_rng();
                 let pk = BigInteger256::rand(&mut rng);
-                EdwardsConfig::GENERATOR.mul_bigint(pk).into_affine()
+                <<C as CurveConfig>::ScalarField>::GENERATOR.mul(pk)
             })
             .collect();
+
         public_keys.push(public_key);
         public_keys.swap(index, ring_size - 1);
-        Ring {
-            keys: public_keys,
-            curve: PhantomData::<EdwardsConfig>,
-        }
+        Ring { keys: public_keys }
     }
 
+    // does order matter for set of pubkeys in this method outside of the one we designate at a
+    // given index?
     pub fn from_pubkeys(
-        pubs: &[ark_ec::twisted_edwards::Affine<EdwardsConfig>],
+        pubs: &[CurvePoint<C>],
         private_key: BigInteger256,
         index: usize,
-    ) -> Ring<ark_ec::twisted_edwards::Affine<EdwardsConfig>, EdwardsConfig> {
+    ) -> Ring<C> {
         let size = pubs.len() + 1;
         assert!(!private_key.is_zero());
         assert!(index < size);
-        let mut ring: Vec<ark_ec::twisted_edwards::Affine<EdwardsConfig>> =
-            Vec::with_capacity(size);
-        let public_key = EdwardsConfig::GENERATOR
-            .mul_bigint(private_key)
-            .into_affine();
-        ring.copy_from_slice(&pubs[0..index]);
+        let mut ring: Vec<CurvePoint<C>> = Vec::with_capacity(size);
+        let public_key = <C as CurveConfig>::ScalarField::GENERATOR.mul(private_key);
+        ring.copy_from_slice(&pubs[..index]);
         ring[index] = public_key;
         ring.copy_from_slice(&pubs[index + 1..]);
-        Ring {
-            keys: ring,
-            curve: PhantomData::<EdwardsConfig>,
-        }
+        Ring { keys: ring }
     }
 
-    pub fn from_fixed_pubkeys(
-        public_keys: Vec<ark_ec::twisted_edwards::Affine<EdwardsConfig>>,
-    ) -> Ring<ark_ec::twisted_edwards::Affine<EdwardsConfig>, EdwardsConfig> {
-        assert!(public_keys.len() > 0);
-        Ring {
-            keys: public_keys,
-            curve: PhantomData::<EdwardsConfig>,
-        }
-    }
-}
-
-/// Secp256k1 Curve
-impl Ring<Affine<Config>, Config> {
-    pub fn new(
-        ring_size: usize,
-        private_key: BigInteger256,
-        index: usize,
-    ) -> Ring<Affine<Config>, Config> {
-        assert!(index < ring_size);
-        assert!(!private_key.is_zero());
-        let public_key = Config::GENERATOR.mul_bigint(private_key).into_affine();
-        let mut public_keys: Vec<Affine<Config>> = (0..ring_size)
-            .into_iter()
-            .map(|_| {
-                let mut rng = rand::thread_rng();
-                let pk = BigInteger256::rand(&mut rng);
-                Config::GENERATOR.mul_bigint(pk).into_affine()
-            })
-            .collect();
-        public_keys.push(public_key);
-        public_keys.swap(index, ring_size - 1);
-        Ring {
-            keys: public_keys,
-            curve: PhantomData::<Config>,
-        }
+    pub fn from_fixed_pubkeys(public_keys: Vec<CurvePoint<C>>) -> Ring<C> {
+        Ring { keys: public_keys }
     }
 
-    // does order of pubkeys matter here??
-    pub fn from_pubkeys(
-        pubs: &[Affine<Config>],
-        private_key: BigInteger256,
-        index: usize,
-    ) -> Ring<Affine<Config>, Config> {
-        let size = pubs.len() + 1;
-        assert!(!private_key.is_zero());
-        assert!(index < size);
-        let mut ring: Vec<Affine<Config>> = Vec::with_capacity(size);
-        let public_key = Config::GENERATOR.mul_bigint(private_key).into_affine();
-        ring[index] = public_key;
-        ring.copy_from_slice(&pubs[0..index]);
-        ring.copy_from_slice(&pubs[index + 1..]);
-        Ring {
-            keys: ring,
-            curve: PhantomData::<Config>,
-        }
-    }
-
-    pub fn from_fixed_pubkeys(public_keys: Vec<Affine<Config>>) -> Ring<Affine<Config>, Config> {
-        assert!(public_keys.len() > 0);
-        Ring {
-            keys: public_keys,
-            curve: PhantomData::<Config>,
-        }
-    }
-}
-
-impl<P, C> Ring<P, C>
-where
-    P: ark_ec::AffineRepr,
-    C: CurveConfig,
-{
     pub fn size(&self) -> usize {
         self.keys.len()
     }
 }
 
 #[derive(PartialEq, Eq)]
-pub struct RingSignature<'a, P, B, C>
+pub struct RingSignature<'a, B, C>
 where
     B: BigInteger,
-    P: AffineRepr,
-    C: CurveConfig,
+    C: ark_ec::CurveConfig + HashToCurve<C> + CurveGroup,
+    <C as CurveConfig>::ScalarField: CurveGroup,
+    <C as CurveConfig>::ScalarField: Mul<BigInt<4>>,
+    <<C as CurveConfig>::ScalarField as Mul<BigInt<4>>>::Output: CurveGroup,
 {
-    pub ring: &'a Ring<P, C>,
+    pub ring: &'a Ring<C>,
     pub challenge: B,
     pub ring_sig_vals: Vec<B>,
-    pub image: P,
-    pub curve: PhantomData<C>,
+    pub image: CurvePoint<C>,
 }
 
-impl<'a, P, B, C> RingSignature<'a, P, B, C>
+impl<'a, B, C> RingSignature<'a, B, C>
 where
     B: BigInteger,
-    P: AffineRepr,
-    C: CurveConfig,
+    C: ark_ec::CurveConfig + HashToCurve<C> + CurveGroup,
+    <C as CurveConfig>::ScalarField: CurveGroup,
+    <C as CurveConfig>::ScalarField: Mul<BigInt<4>>,
+    <<C as CurveConfig>::ScalarField as Mul<BigInt<4>>>::Output: CurveGroup,
 {
-    pub fn public_keys(&self) -> &[P] {
+    pub fn public_keys(&self) -> &[CurvePoint<C>] {
         &self.ring.keys
     }
 
-    pub fn ring(&self) -> &Ring<P, C> {
+    pub fn ring(&self) -> &Ring<C> {
         self.ring
     }
 }
